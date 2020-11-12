@@ -58,7 +58,7 @@ except Exception as e:
 
 # -- General configuration -----------------------------------------------------
 
-# If your documentation needs a minimal Sphinx version, state it here.
+# If your documentation needs a minimal Sphinx version, test_state it here.
 # needs_sphinx = '1.0'
 
 # Add any Sphinx extension module names here, as strings. They can be extensions
