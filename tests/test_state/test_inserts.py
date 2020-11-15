@@ -1,5 +1,6 @@
 from datetime import datetime
 import pandas as pd
+import numpy as np
 
 
 def test_individual_inserts_simple(simple_state_empty):
@@ -12,8 +13,8 @@ def test_individual_inserts_simple(simple_state_empty):
     assert state[1].start == pd.to_datetime("2020-12-10", utc=True)
     assert state[1].end == pd.to_datetime("2020-12-24", utc=True)
 
-    assert state[1]["2020-12-9"] == {"can_make": None, "kind": None, "amount": None}
-    assert state[1]["2020-12-10"] == {"can_make": None, "kind": "elf", "amount": None}
+    assert state[1]["2020-12-9"] == {"can_make": np.NaN, "kind": np.NaN, "amount": 0}
+    assert state[1]["2020-12-10"] == {"can_make": np.NaN, "kind": "elf", "amount": 0}
     assert state[1][datetime(2020, 12, 22)] == {"can_make": "presents", "kind": "elf", "amount": 5}
     assert state[1][datetime(2020, 12, 23)] == {"can_make": "presents", "kind": "elf", "amount": 5}
 
@@ -29,8 +30,8 @@ def test_individual_inserts_configured(conf_state_empty):
     assert state[1].start == pd.to_datetime("2020-12-10", utc=True)
     assert state[1].end == pd.to_datetime("2020-12-24", utc=True)
 
-    assert state[1]["2020-12-9"] == {"can_make": None, "kind": None, "amount": None}
-    assert state[1]["2020-12-10"] == {"can_make": None, "kind": "elf", "amount": None}
+    assert state[1]["2020-12-9"] == {"can_make": np.NaN, "kind": np.NaN, "amount": 0}
+    assert state[1]["2020-12-10"] == {"can_make": np.NaN, "kind": "elf", "amount": 0}
     assert state[1][datetime(2020, 12, 22)] == {"can_make": "presents", "kind": "elf", "amount": 5}
 
     """
@@ -59,9 +60,15 @@ def test_df_inserts(conf_state_empty):
     assert state.start == pd.to_datetime("2020-12-1", utc=True)
     assert state.end == pd.to_datetime("2020-12-24", utc=True)
 
-    assert state[0].start == pd.to_datetime("2020-12-10", utc=True)
+    assert state[0].start == pd.to_datetime("2020-12-01", utc=True)
     assert state[0].end == pd.to_datetime("2020-12-24", utc=True)
-    assert state[1].start == pd.to_datetime("2020-12-1", utc=True)
+    assert state[1].start == pd.to_datetime("2020-12-01", utc=True)
     assert state[1].end == pd.to_datetime("2020-12-11", utc=True)
+    assert pd.isna(state[1][datetime(2020, 12, 11)]["amount"])
+    assert pd.isna(state[0]["2020-12-20"]["amount"])
+
+    assert state[0]["2020-12-21"]["amount"] == 4
+    assert state[0][datetime(2020, 12, 21, 12)]["amount"] == 4
+    assert state[0][datetime(2020, 12, 23)]["amount"] == 52
 
 

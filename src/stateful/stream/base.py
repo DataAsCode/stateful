@@ -1,27 +1,26 @@
 from datetime import timedelta
-from itertools import repeat
+from functools import partial
 
-import pandas as pd
-from pandas.api.types import infer_dtype
-import redblackpy as rb
 import numpy as np
+import pandas as pd
+from stateful.representable import Representable
+from stateful.utils import list_of_instance
 
 
-# from stateful.state_value import StateValue
+class BaseStream(Representable):
 
-
-class BaseStream:
-
-    def __init__(self, configuration: dict = {}, dtype=None, history=None, index={}):
-        """
-        A Red-Black Tree written in C++ is used as the foundation, to make lookups efficient
-        """
+    def __init__(self, name, configuration: dict = None, dtype=None, history=None, index=None, streams=None,
+                 function=None):
+        Representable.__init__(self)
+        self.name = name
         self.dtype = dtype
-        self.history = history
+        self._history = history
         self._iter = None
-        self._index = index
+        self._index = index if index is not None else {}
         self.configuration = {"on_dublicate": "increment"}
         self.configuration.update(configuration if configuration else {})
+        self.streams = streams
+        self.function = function
 
     @property
     def interpolation(self):
@@ -32,149 +31,432 @@ class BaseStream:
         return self.configuration.get("extrapolation", None if self.dtype in ["str", "object"] else 0)
 
     @property
-    def arithmetic(self):
-        return self.configuration.get("arithmetic", "union")
-
-    @property
     def on_dublicate(self):
         return self.configuration["on_dublicate"]
 
     @property
     def start(self):
-        return self.history.begin()
+        raise NotImplementedError("start() should be implemented by all children")
 
     @property
     def end(self):
-        return self.history.end()
+        raise NotImplementedError("end() should be implemented by all children")
 
     @property
-    def events(self):
-        return self.history.values()
+    def first(self):
+        return self._safe_get(self.start)
 
-    def _infer_type(self, example):
-        self.dtype = self.configuration.get("dtype", infer_dtype([example]))
+    @property
+    def last(self):
+        return self._safe_get(self.start)
 
-        if self.configuration["on_dublicate"] == "keep":
-            rb_dtype = "object"
-        elif self.dtype == "string":
-            rb_dtype = "str"
-        elif self.dtype == "integer":
-            rb_dtype = "float32"
-        elif self.dtype == "floating":
-            rb_dtype = "float32"
+    def head(self, n=5) -> pd.DataFrame:
+        index, values = [], []
+        iterator = iter(self)
+
+        while len(index) < n:
+            idx, value = next(iterator)
+            index.append(idx)
+            values.append(value)
+
+        if list_of_instance(values, dict):
+            return pd.DataFrame(values, index=index)
         else:
-            rb_dtype = "object"
+            return pd.DataFrame(columns={self.name: values}, index=index)
 
-        self.history = rb.Series(dtype=rb_dtype,
-                                 interpolate=self.interpolation,
-                                 extrapolate=self.extrapolation,
-                                 arithmetic=self.arithmetic)
+    def df(self) -> pd.DataFrame:
+        index, values = [], []
+        for idx, value in self:
+            index.append(idx)
+            values.append(value)
+
+        if list_of_instance(values, dict):
+            return pd.DataFrame(values, index=index)
+        else:
+            return pd.DataFrame(columns={self.name: values}, index=index)
+
+    def _safe_get_before(self, date):
+        if self.interpolation == "ceil":
+            return self.first
+
+        if self.dtype in ["integer", "floating"]:
+            return 0
+
+        return np.NaN
+
+    def _safe_get(self, date):
+        raise NotImplementedError("_safe_get() should be implemented by all children")
+
+    def _safe_get_after(self, date):
+        if self.interpolation == "floor":
+            return self.last
+
+        if self.dtype in ["integer", "floating"]:
+            return 0
+
+        return np.NaN
+
+    def alias(self, name):
+        raise NotImplementedError("alias(name) should be implemented by all children")
 
     def _safe_add(self, date, state):
-        self.history[date] = state
+        raise NotImplementedError("_safe_add() should be implemented by all children")
 
-        # TODO Fix a bug in RedBlackPy which returns the wrong result when the query is in the index (DivisionByZero)
-        if self.interpolation == "linear":
-            self._index[date] = state
+    def values(self) -> set:
+        raise NotImplementedError("values() should be implemented by all children")
 
-    def add(self, date, state):
-        if self.dtype is None:
-            self._infer_type(state)
+    def keys(self) -> set:
+        raise NotImplementedError("keys() should be implemented by all children")
+
+    def on(self, on=True) -> None:
+        raise NotImplementedError("on() should be implemented by all children")
+
+    def iter(self):
+        raise NotImplementedError("iter() should be implemented by all children")
+
+    def within(self, date) -> bool:
+        raise NotImplementedError("within(date) should be implemented by all children")
+
+    def cast(self, value, inverse=False):
+        if pd.isna(value):
+            return value
+
+        if self.dtype == "integer":
+            return int(value) if not inverse else int(value)
+        elif self.dtype == "boolean":
+            return bool(value) if not inverse else int(value)
+        else:
+            return value
+
+    def get(self, date):
+        if isinstance(date, list) or isinstance(date, tuple) or isinstance(date, set):
+            return [self.get(d) for d in date]
+
+        if not self:
+            return np.NaN
 
         date = pd.to_datetime(date, utc=True)
+
+        if self.start > date:
+            return self.cast(self._safe_get_before(date))
+        elif self.end < date:
+            return self.cast(self._safe_get_after(date))
+        else:
+            return self.cast(self._safe_get(date))
+
+    def add(self, date, state):
+        date = pd.to_datetime(date, utc=True)
+        state = self.cast(state, inverse=True)
 
         try:
             self._safe_add(date, state)
         except KeyError:
-            if self.on_dublicate == "erase":
-                self.history.erase(date)
-                self._safe_add(date, state)
-            elif self.on_dublicate == "keep":
-                prev_state = self.history[date]
-                self.history.erase(date)
-                self._safe_add(date, [prev_state, state])
-            elif self.on_dublicate == "increment":
+            if self.on_dublicate == "increment":
                 date = date + timedelta(seconds=1)
                 self.add(date, state)
 
-    def _safe_get(self, date):
-        # TODO Fix a bug in RedBlackPy which returns the wrong result when the query is in the index (DivisionByZero)
-        if self.interpolation == "linear":
-            if date in self._index:
-                result = self._index[date]
-            else:
-                result = self.history[date]
+    """
+    List methods
+    """
+
+    def __len__(self):
+        raise NotImplementedError("__len__ should be implemented by all children")
+
+    def __contains__(self, item):
+        try:
+            date = pd.to_datetime(item, utc=True)
+            return self.start <= date <= self.end
+        except:
+            return item in self.values()
+
+    def __iter__(self):
+        self.on(True)
+        self._iter = self.iter()
+        return self
+
+    def __next__(self):
+        try:
+            idx = next(self._iter)
+            return idx, self.get(idx)
+        except StopIteration:
+            self.on(False)
+            raise StopIteration
+
+    """
+    Add dictionary methods
+    """
+
+    def __getitem__(self, item):
+        return self.get(item)
+
+    def __setitem__(self, date, state):
+        type_check = all([
+            isinstance(date, list) or isinstance(date, tuple) or isinstance(date, np.ndarray),
+            isinstance(state, list) or isinstance(state, tuple) or isinstance(state, np.ndarray)
+        ])
+
+        if type_check:
+            for d, s in zip(date, state):
+                self.add(d, s)
         else:
-            result = self.history[date]
+            self.add(date, state)
 
-        if self.dtype == "integer":
-            return int(result)
+    """
+    Add merge functions
+    """
+
+    @staticmethod
+    def _merge(left, right, func):
+        from stateful.stream.stream_multi import MultiStream
+        return MultiStream(name=f"{left.name}_{right.name}",
+                           configuration=left,
+                           dtype=left.dtype,
+                           streams=[left, right],
+                           function=func)
+
+    def _transform(self, func):
+        from stateful.stream.stream_aggregated import AggregatedStream
+        return AggregatedStream(name=self.name,
+                                configuration=self.configuration,
+                                dtype=self.dtype,
+                                stream=self,
+                                function=func)
+
+    def apply(self, func):
+        return self._transform(func)
+
+    """
+    Add Destructor
+    """
+
+    def __del__(self):
+        del self.name
+        del self.dtype
+        del self._history
+        del self._iter
+        del self._index
+        del self.configuration
+        del self.streams
+        del self.function
+
+    """
+    Add mathematical methods
+    """
+
+    @staticmethod
+    def _generate_func(stream_a, stream_b, func):
+        name_a = stream_a.name
+        name_b = stream_b.name
+        return partial(lambda state, a, b: func(state[a], state[b]), a=name_a, b=name_b)
+
+    @staticmethod
+    def _ensure_unique_naming(stream_left, stream_right):
+        if stream_left.name != stream_right.name:
+            return stream_left, stream_right
+
+        return stream_left.alias(f"{stream_left.name}_left"), stream_right.alias(f"{stream_right.name}_right")
+
+    def __add__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a + b))
         else:
-            return result
+            return self._transform(lambda a: a + other)
 
-    def get(self, date_or_index):
-        if isinstance(date_or_index, int) or isinstance(date_or_index, slice):
-            return self._safe_get(self.history.index()[date_or_index])
-
-        if len(self.history) == 0 or self.history.begin() > date_or_index:
-            return None
-        elif self.history.end() < date_or_index:
-            return self._safe_get(self.history.end())
+    def __radd__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b + a))
         else:
-            return self._safe_get(date_or_index)
+            return self._transform(lambda a: other + a)
 
-    def in_range(self, start, end, freq):
-        if start < self.start:
-            start_to_hist = zip(pd.date_range(start, self.start, freq), repeat(None))
+    def __sub__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a - b))
         else:
-            start_to_hist = []
+            return self._transform(lambda a: a - other)
 
-        if end > self.end:
-            end = self.history.end()
-            hist_to_end = zip(pd.date_range(start, self.start, freq), repeat(end))
+    def __rsub__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b - a))
         else:
-            hist_to_end = []
+            return self._transform(lambda a: other - a)
 
-        return start_to_hist + self.history.uniform(start, end, pd.to_timedelta(freq)) + hist_to_end
-
-    def iter(self, on=True):
-        if on:
-            self.history.on_itermode()
+    def __mul__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a * b))
         else:
-            self.history.off_itermode()
+            return self._transform(lambda a: a * other)
 
-    def _merge_history(self, other, func):
-        from stateful.stream.stream import Stream
-        def safe_func(*args):
-            try:
-                return func(*args)
-            except:
-                return np.NaN
+    def __rmul__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b * a))
+        else:
+            return self._transform(lambda a: other * a)
 
-        index = list(rb.SeriesIterator([self.history, other.history])())
-        values = []
+    def __pow__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(self, other, lambda a, b: a ** b))
+        else:
+            return self._transform(lambda a: a ** other)
 
-        """
-        We merge the two histories by only applying the function to the indexes which are within the range
-        of each history
-        """
-        for idx in index:
-            if (self.start <= idx <= self.end) and (other.start <= idx <= other.end):
-                values.append(safe_func(self[idx], other[idx]))
-            elif (self.start <= idx <= self.end):
-                values.append(safe_func(self[idx], 0))
-            else:
-                values.append(safe_func(0, other[idx]))
+    def __rpow__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b ** a))
+        else:
+            return self._transform(lambda a: other ** a)
 
-        history = rb.Series(index,
-                            values,
-                            dtype=self.history.dtype,
-                            interpolate=self.interpolation,
-                            extrapolate=self.extrapolation,
-                            arithmetic=self.arithmetic)
+    def __mod__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a % b))
+        else:
+            return self._transform(lambda a: a % other)
 
-        return Stream(dtype=self.dtype, history=history, index=self._index)
+    def __rmod__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b % a))
+        else:
+            return self._transform(lambda a: other % a)
 
-    def _transform_history(self, func):
-        from stateful.stream.stream import Stream
-        return Stream(dtype=self.dtype, history=self.history.map(func), index=self._index)
+    def __floordiv__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a // b))
+        else:
+            return self._transform(lambda a: a // other)
+
+    def __rfloordiv__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(self, other, lambda a, b: b // a))
+        else:
+            return self._transform(lambda a: other // a)
+
+    def __truediv__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a / b))
+        else:
+            return self._transform(lambda a: a / other)
+
+    def __rtruediv__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b / a))
+        else:
+            return self._transform(lambda a: other / a)
+
+    def __and__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a and b))
+        else:
+            return self._transform(lambda a: a and other)
+
+    def __rand__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b and a))
+        else:
+            return self._transform(lambda a: other and a)
+
+    def __or__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a or b))
+        else:
+            return self._transform(lambda a: a or other)
+
+    def __ror__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b or a))
+        else:
+            return self._transform(lambda a: other or a)
+
+    def __eq__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: a == b))
+        else:
+            return self._transform(lambda a: a == other)
+
+    def __neq__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b != a))
+        else:
+            return self._transform(lambda a: other != a)
+
+    def __gt__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b > a))
+        else:
+            return self._transform(lambda a: other > a)
+
+    def __ge__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b >= a))
+        else:
+            return self._transform(lambda a: other >= a)
+
+    def __lt__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b < a))
+        else:
+            return self._transform(lambda a: other < a)
+
+    def __le__(self, other):
+        if issubclass(type(other), BaseStream):
+            left, right = self._ensure_unique_naming(self, other)
+            return self._merge(left, right, self._generate_func(left, right, lambda a, b: b <= a))
+        else:
+            return self._transform(lambda a: other <= a)
+
+    """
+    Unary operators
+    """
+
+    def __neg__(self):
+        return self._transform(lambda a: a.__neq__())
+
+    def __pos__(self):
+        return self._transform(lambda a: a.__pos__())
+
+    def __abs__(self):
+        return self._transform(lambda a: a.__abs__())
+
+    def __invert__(self):
+        return self._transform(lambda a: a.__invert__())
+
+    def __int__(self):
+        return self._transform(lambda a: a.__int__())
+
+    def __bool__(self):
+        return bool(len(self))
+
+    def __long__(self):
+        return self._transform(lambda a: a.__long__())
+
+    def __float__(self):
+        return self._transform(lambda a: a.__float__())
+
+    def __complex__(self):
+        return self._transform(lambda a: a.__complex__())
+
+    def __oct__(self):
+        return self._transform(lambda a: a.__oct__())
+
+    def __hex__(self):
+        return self._transform(lambda a: a.__hex__())

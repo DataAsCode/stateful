@@ -1,1 +1,1 @@
-from stateful.stream.stream import Stream
+from stateful.stream.stream_single import Stream
