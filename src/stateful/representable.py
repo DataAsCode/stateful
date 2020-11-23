@@ -3,6 +3,10 @@ import pandas as pd
 
 class Representable:
 
+    @property
+    def empty(self):
+        raise NotImplementedError("empty() should be implemented by all children")
+
     def df(self) -> pd.DataFrame:
         raise NotImplementedError("df() should be implemented by all children")
 
@@ -10,16 +14,29 @@ class Representable:
         raise NotImplementedError("head() should be implemented by all children")
 
     def __repr__(self):
-        return self.head().__repr__()
+        if not self.empty:
+            return self.head().__repr__()
+        return str(self)
 
     def _repr_data_resource_(self):
-        return self.head()._repr_data_resource_()
+        if not self.empty:
+            return self.head()._repr_data_resource_()
+        return str(self)
 
     def _repr_fits_horizontal_(self):
-        return self.head()._repr_fits_horizontal_()
+        if not self.empty:
+            return self.head()._repr_fits_horizontal_()
+        return str(self)
 
     def _repr_fits_vertical_(self):
-        return self.head()._repr_fits_vertical_()
+        if not self.empty:
+            return self.head()._repr_fits_vertical_()
+        return str(self)
 
     def _repr_html_(self):
-        return self.head()._repr_html_()
+        if not self.empty:
+            return self.head()._repr_html_()
+        return str(self)
+
+    def __str__(self):
+        return f"{type(self).__name__}"

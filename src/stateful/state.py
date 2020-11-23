@@ -1,21 +1,27 @@
+from datetime import datetime
 from itertools import repeat
 from random import choice
+from typing import Dict
 
 import pandas as pd
+from pandas import DatetimeIndex
+from stateful.state_transposed import TransposedState
 from stateful.representable import Representable
-from stateful.space.space import Space
+from stateful.space import Space
+from stateful.storage.calculated_stream import CalculatedStream
+from stateful.storage.stream import Stream
 from stateful.utils import list_of_instance
 
 
 class State(Representable):
-    def __init__(self, primary_key, time_key="date", configuration=None, stream_names=None):
+    def __init__(self, primary_key, time_key="date", configuration=None, stream_name=None):
         Representable.__init__(self)
-
         self.primary_key = primary_key
         self.time_key = time_key
-        self._all_stream_names = stream_names if stream_names else set()
+
         self.all_spaces = {}
         self.configuration = configuration if configuration else {}
+        self._all_stream_names = stream_name if stream_name else {key for key in self.configuration.keys()}
 
     @property
     def start(self):
@@ -30,26 +36,40 @@ class State(Representable):
         return self._all_stream_names
 
     @property
+    def empty(self):
+        return bool(self.all_spaces) and len(self) == 0
+
+    @property
     def space(self):
         class SpaceGetter:
             def __getitem__(_, item):
                 self._ensure(item)
                 return self.all_spaces[item]
 
-            def __setitem__(_, name, stream):
-                self._ensure(name)
-                stream.name = "value"
-                self.all_spaces[name]["value"] = stream
+            def random(_):
+                attempts = 10
+                space = choice(list(self.all_spaces.values()))
+                while not space and attempts > 0:
+                    attempts -= 1
+                    space = choice(list(self.all_spaces.values()))
+
+                return space
 
         return SpaceGetter()
 
-    def iter_spaces(self):
-        return iter(self.all_spaces.items())
+    def transpose(self, freq="1d"):
+        return TransposedState(self, freq)
+
+    def cross(self, freq="1d"):
+        return self.transpose(freq)
 
     def _ensure(self, key):
         if not key in self.all_spaces:
-            self.all_spaces[key] = Space(self.primary_key, key, self.time_key, self._all_stream_names,
-                                         self.configuration)
+            self.all_spaces[key] = Space(primary_key=self.primary_key,
+                                         primary_value=key,
+                                         time_key=self.time_key,
+                                         get_keys=lambda: self._all_stream_names,
+                                         configuration=self.configuration)
 
     def add(self, event: dict):
         assert isinstance(event, dict), "Event has to be a dictionary"
@@ -57,8 +77,19 @@ class State(Representable):
         assert self.time_key in event, "Event has to include time key"
         key = event.pop(self.primary_key)
 
+        for name in event.keys():
+            if name != self.time_key:
+                self._all_stream_names.add(name)
+
         self._ensure(key)
         self.all_spaces[key].add(event)
+
+    def _broadcast_stream(self, stream_name):
+        if stream_name not in self._all_stream_names:
+            self._all_stream_names.add(stream_name)
+
+    def set(self, name, space):
+        self.all_spaces[name] = space
 
     def include(self, df, primary_column=None, time_column=None, event=None, columns=None, drop_na=False, fill_na=None):
         assert event is not None or columns is not None
@@ -98,33 +129,48 @@ class State(Representable):
 
             self.add(row)
 
-    def rand_choice(self):
-        attempts = 10
-        space = choice(list(self.all_spaces.values()))
-        while not space and attempts > 0:
-            attempts -= 1
-            space = choice(list(self.all_spaces.values()))
-
-        return space
+    def all(self, dates):
+        for name, space in self.all_spaces.items():
+            events = space.all(dates)
+            events.add_column(self.primary_key, name)
+            yield events
 
     def __getitem__(self, item):
-        from stateful.state.state_view import StateView
-
         if isinstance(item, str):
-            return StateView(self, item)
+            return CalculatedStream([item])
         elif list_of_instance(item, str):
-            return StateView(self, *item)
+            return CalculatedStream(item)
+        elif list_of_instance(item, datetime) or isinstance(item, DatetimeIndex):
+            return self.all(dates=item)
         elif isinstance(item, slice):
             # do your handling for a slice object:
             print(item.start, item.stop, item.step)
 
-    def __setitem__(self, name, state):
-        if isinstance(name, str) and isinstance(state, State) and len(state.keys) == 1 and "value" in state.keys:
-            for primary_key, space in state.spaces:
-                self.all_spaces[primary_key][name] = space["value"]
+    def apply(self, function):
+        transformation = {}
+        for name, space in self.all_spaces.items():
+            if space:
+                stream = space.as_stream().apply(function)
+                transformation[name] = stream
+
+        return transformation
+
+    def filter(self, function):
+        state = State(self.primary_key, self.time_key, self.configuration)
+        for name, space in self.all_spaces.items():
+            if function(space):
+                state.set(name, space)
+        return state
+
+    def __setitem__(self, name, item):
+        assert isinstance(item, CalculatedStream)
+        for space in self.all_spaces.values():
+            space[name] = item.assign_to(space)
+
+        self._all_stream_names.add(name)
 
     def __len__(self):
-        return len(self.dates())
+        return sum([len(space) for space in self.all_spaces.values()])
 
     def dates(self):
         all_dates = set()
@@ -135,7 +181,7 @@ class State(Representable):
     def head(self, n=5):
         events = []
         for _ in range(n):
-            space = self.rand_choice()
+            space = self.space.random()
             events += [space.first, space.last]
 
         df = pd.DataFrame(events)
