@@ -30,9 +30,9 @@ def cast_output_numpy(dtype, arr: np.ndarray):
 def cast_output(dtype, value):
     from stateful.event.event import Event
     if isinstance(value, Event) and value.isna():
-        return value.isna()
+        return np.NaN
     elif not isinstance(value, Event) and pd.isna(value):
-        return value
+        return np.NaN
     elif isinstance(value, np.ndarray):
         return cast_output_numpy(dtype, value)
     elif dtype == "integer":
@@ -41,3 +41,8 @@ def cast_output(dtype, value):
         return bool(value)
     else:
         return value
+
+
+def infer_dtype(value):
+    from pandas.api.types import infer_dtype as infer
+    return infer([value])

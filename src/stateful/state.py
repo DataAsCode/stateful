@@ -9,7 +9,7 @@ from stateful.state_transposed import TransposedState
 from stateful.representable import Representable
 from stateful.space import Space
 from stateful.storage.calculated_stream import CalculatedStream
-from stateful.storage.stream import Stream
+from stateful.storage.stream_graph import StreamGraph
 from stateful.utils import list_of_instance
 
 
@@ -21,7 +21,7 @@ class State(Representable):
 
         self.all_spaces = {}
         self.configuration = configuration if configuration else {}
-        self._all_stream_names = stream_name if stream_name else {key for key in self.configuration.keys()}
+        self.graph = StreamGraph(stream_name if stream_name else {key for key in self.configuration.keys()})
 
     @property
     def start(self):
@@ -33,7 +33,7 @@ class State(Representable):
 
     @property
     def keys(self):
-        return self._all_stream_names
+        return self.graph.keys
 
     @property
     def empty(self):
@@ -47,13 +47,11 @@ class State(Representable):
                 return self.all_spaces[item]
 
             def random(_):
-                attempts = 10
-                space = choice(list(self.all_spaces.values()))
-                while not space and attempts > 0:
-                    attempts -= 1
-                    space = choice(list(self.all_spaces.values()))
-
-                return space
+                non_empty_spaces = [space for space in self.all_spaces.values() if not space.empty]
+                if non_empty_spaces:
+                    return choice(non_empty_spaces)
+                else:
+                    raise ValueError("Only empty spaces avialable")
 
         return SpaceGetter()
 
@@ -68,7 +66,7 @@ class State(Representable):
             self.all_spaces[key] = Space(primary_key=self.primary_key,
                                          primary_value=key,
                                          time_key=self.time_key,
-                                         get_keys=lambda: self._all_stream_names,
+                                         graph=self.graph,
                                          configuration=self.configuration)
 
     def add(self, event: dict):
@@ -79,14 +77,10 @@ class State(Representable):
 
         for name in event.keys():
             if name != self.time_key:
-                self._all_stream_names.add(name)
+                self.graph.add(name, [])
 
         self._ensure(key)
         self.all_spaces[key].add(event)
-
-    def _broadcast_stream(self, stream_name):
-        if stream_name not in self._all_stream_names:
-            self._all_stream_names.add(stream_name)
 
     def set(self, name, space):
         self.all_spaces[name] = space
@@ -146,15 +140,6 @@ class State(Representable):
             # do your handling for a slice object:
             print(item.start, item.stop, item.step)
 
-    def apply(self, function):
-        transformation = {}
-        for name, space in self.all_spaces.items():
-            if space:
-                stream = space.as_stream().apply(function)
-                transformation[name] = stream
-
-        return transformation
-
     def filter(self, function):
         state = State(self.primary_key, self.time_key, self.configuration)
         for name, space in self.all_spaces.items():
@@ -164,10 +149,10 @@ class State(Representable):
 
     def __setitem__(self, name, item):
         assert isinstance(item, CalculatedStream)
+        self.graph.add(name, item.dependencies)
+
         for space in self.all_spaces.values():
             space[name] = item.assign_to(space)
-
-        self._all_stream_names.add(name)
 
     def __len__(self):
         return sum([len(space) for space in self.all_spaces.values()])
@@ -182,7 +167,7 @@ class State(Representable):
         events = []
         for _ in range(n):
             space = self.space.random()
-            events += [space.first, space.last]
+            events += [space.first.value, space.last.value]
 
         df = pd.DataFrame(events)
         df = df.set_index(self.time_key)
@@ -192,7 +177,7 @@ class State(Representable):
     def df(self):
         events = []
         for space_events in map(list, self.all_spaces.values()):
-            events += space_events
+            events += [event.value for event in space_events]
 
         df = pd.DataFrame(events)
         df = df.set_index(self.time_key)

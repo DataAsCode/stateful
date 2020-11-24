@@ -13,12 +13,14 @@ class CalculatedStream(Representable):
     def __init__(self, dependencies: List[str],
                  dtype: Optional[str] = None,
                  function: Optional[Callable] = None,
-                 parent: Optional[Space] = None):
+                 parent: Optional[Space] = None,
+                 vectorized=False):
 
         self.dependencies = dependencies
         self.function = function
         self._parent: Optional[Space] = parent
         self._dtype = dtype
+        self.vectorized = vectorized
 
     @property
     def dtype(self):
@@ -100,8 +102,21 @@ class CalculatedStream(Representable):
         name_b = stream_b.name
         return partial(lambda state, a, b: func(state[a], state[b]), a=name_a, b=name_b)
 
-    def apply(self, function):
-        return CalculatedStream(self.dependencies, function=function, dtype=self.dtype, parent=self._parent)
+    def apply(self, function, vectorized=False):
+        def maybe_wrap(func, old_func):
+            if old_func is None:
+                return func
+
+            def wrapper(*args, **kwargs):
+                return func(old_func(*args, **kwargs))
+
+            return wrapper
+
+        return CalculatedStream(self.dependencies,
+                                function=maybe_wrap(function, self.function),
+                                dtype=self.dtype,
+                                vectorized=vectorized,
+                                parent=self._parent)
 
     def __assertions(self, other):
         # @no:format
@@ -112,8 +127,8 @@ class CalculatedStream(Representable):
     def __getitem__(self, item):
         return self.get(item)
 
-    def __call__(self, event):
-        return self.function(event)
+    def calculate(self, event, name):
+        return event.apply(self.function, name=name, vectorized=self.vectorized)
 
     def _calculate_dtype(self, other):
         dtypes = {self.dtype, other.dtype}
@@ -535,7 +550,7 @@ class CalculatedStream(Representable):
         def function(event, key):
             return event[key].__neg__()
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)
 
     def __pos__(self):
         assert len(self.dependencies) == 1, "__pos__ only works on single streams"
@@ -543,7 +558,7 @@ class CalculatedStream(Representable):
         def function(event, key):
             return event[key].__pos__()
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)
 
     def __abs__(self):
         assert len(self.dependencies) == 1, "__abs__ only works on single streams"
@@ -551,7 +566,7 @@ class CalculatedStream(Representable):
         def function(event, key):
             return event[key].__abs__()
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)
 
     def __invert__(self):
         assert len(self.dependencies) == 1, "__invert__ only works on single streams"
@@ -559,7 +574,7 @@ class CalculatedStream(Representable):
         def function(event, key):
             return event[key].__invert__()
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)
 
     def __int__(self):
         assert len(self.dependencies) == 1, "__int__ only works on single streams"
@@ -570,7 +585,7 @@ class CalculatedStream(Representable):
             except:
                 return event[key].astype(int)
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)
 
     def __bool__(self):
         assert len(self.dependencies) == 1, "__bool__ only works on single streams"
@@ -581,7 +596,7 @@ class CalculatedStream(Representable):
             except:
                 return event[key].astype(bool)
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)
 
     def __float__(self):
         assert len(self.dependencies) == 1, "__float__ only works on single streams"
@@ -592,7 +607,7 @@ class CalculatedStream(Representable):
             except:
                 return event[key].astype(float)
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)
 
     def __hash__(self):
         assert len(self.dependencies) == 1, "__hex__ only works on single streams"
@@ -603,4 +618,4 @@ class CalculatedStream(Representable):
             except:
                 return np.array([hash(v) for v in event[key]], dtype="object")
 
-        return self.apply(partial(function, key=self.dependencies[0]))
+        return self.apply(partial(function, key=self.dependencies[0]), vectorized=True)

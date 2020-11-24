@@ -2,9 +2,10 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from pandas import DatetimeIndex
 from stateful.representable import Representable
 from stateful.storage.tree import DateTree
-from stateful.utils import list_of_instance
+from stateful.utils import list_of_instance, cast_output
 from pandas.api.types import infer_dtype
 
 
@@ -107,10 +108,16 @@ class Stream(Representable):
         return self.tree.within(date)
 
     def get(self, date, cast=True):
-        return self.tree.get(date, cast)
+        if cast:
+            return cast_output(self.dtype, self.tree.get(date))
+        else:
+            return self.tree.get(date)
 
-    def all(self, dates, cast=True):
-        return self.tree.all(dates, cast)
+    def all(self, dates: DatetimeIndex, cast=True):
+        if cast:
+            return self.tree.all(dates).cast(self.dtype)
+        else:
+            return self.tree.all(dates)
 
     def add(self, date, state):
         if pd.isna(state) and self.empty:

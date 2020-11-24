@@ -2,6 +2,7 @@ from stateful.event.base import EventBase
 
 import pandas as pd
 import numpy as np
+from stateful.utils import list_of_instance
 
 
 class Event(EventBase):
@@ -19,7 +20,7 @@ class Event(EventBase):
         else:
             return self._state
 
-    def apply(self, function):
+    def apply(self, function, name=None, vectorized=False):
         new_state = {"value": function(self)}
         return Event(self.date, new_state)
 
@@ -34,7 +35,10 @@ class Event(EventBase):
 
     def __getitem__(self, item):
         if isinstance(self._state, dict):
-            return self._state.get(item, np.NaN)
+            if isinstance(item, str):
+                return self._state.get(item, np.NaN)
+            if list_of_instance(item, str):
+                return Event(date=self.date, state={name: self[name] for name in item})
         else:
             raise AttributeError(f"{self.value} is not a dictionary")
 
@@ -251,15 +255,6 @@ class Event(EventBase):
 
     def __float__(self):
         return float(self.value) if not pd.isna(self.value) else self.value
-
-    def __complex__(self):
-        return complex(self.value) if not pd.isna(self.value) else self.value
-
-    def __oct__(self):
-        return oct(self.value) if not pd.isna(self.value) else self.value
-
-    def __hex__(self):
-        return hex(self.value) if not pd.isna(self.value) else self.value
 
     def __str__(self):
         return str(self.value) if not pd.isna(self.value) else self.value

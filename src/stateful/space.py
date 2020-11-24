@@ -8,12 +8,12 @@ from stateful.utils import list_of_instance
 
 class Space(Representable):
 
-    def __init__(self, primary_key, primary_value, time_key, get_keys, configuration=None):
+    def __init__(self, primary_key, primary_value, time_key, graph, configuration=None):
         Representable.__init__(self)
         self.time_key = time_key
         self.primary_key = primary_key
         self.primary_value = primary_value
-        self.controller = StreamController(get_keys, configuration)
+        self.controller = StreamController(graph, configuration)
         self._iter = None
         self._prev = None
         self.length = 0
@@ -28,11 +28,11 @@ class Space(Representable):
 
     @property
     def first(self):
-        return self.controller.get(self.start)
+        return self.get(self.start)
 
     @property
     def last(self):
-        return self.controller.get(self.end)
+        return self.get(self.end)
 
     @property
     def empty(self):
@@ -65,7 +65,7 @@ class Space(Representable):
 
         return event
 
-    def all(self, times):
+    def all(self, times=None):
         return self.controller.all(times)
 
     def add_stream(self, name):
@@ -73,6 +73,7 @@ class Space(Representable):
 
     def head(self, n=5):
         events = list(self)
+        events = [event.value for event in events]
         if len(events) > (n * 2):
             df = pd.DataFrame(events[:n] + events[-n:])
         else:
@@ -81,7 +82,7 @@ class Space(Representable):
         return df
 
     def df(self):
-        events = list(self)
+        events = self.all()
         df = pd.DataFrame(events)
         df = df.set_index(self.time_key)
         return df

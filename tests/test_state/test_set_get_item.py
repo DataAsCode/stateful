@@ -13,8 +13,7 @@ def test_set_get_item(stateful_state):
     state["is_cool"] = state["agreement"].apply(is_cool)
 
     for space in state.all_spaces.values():
-        assert sorted(space.keys) == sorted(state.keys) == sorted(
-            {"is_cool", "agreement", "amount", "payment", "weird_stream"})
+        assert set(space.keys) == set(state.keys) == {"is_cool", "agreement", "amount", "payment", "weird_stream"}
 
     assert state.space[0]["2020-12-21"]["is_cool"] == "cool"
     assert state.space[1]["2020-12-25"]["is_cool"] == "cool"

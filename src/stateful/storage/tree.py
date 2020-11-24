@@ -5,7 +5,7 @@ import pandas as pd
 from pandas import DatetimeIndex
 from pandas.api.types import infer_dtype
 import numpy as np
-from stateful.event.event_frame import EventFrame
+from stateful.event.event_column import EventColumn
 
 
 class DateTree:
@@ -91,14 +91,14 @@ class DateTree:
     @property
     def first(self):
         if self.empty:
-            return self._apply_function(np.NaN, self.default)
+            return self.default
 
         return self.get(self.start)
 
     @property
     def last(self):
         if self.empty:
-            return self._apply_function(np.NaN, self.default)
+            return self.default
 
         return self.get(self.end)
 
@@ -118,7 +118,6 @@ class DateTree:
                         interpolation=self.interpolation,
                         on_dublicate=self.on_dublicate,
                         tree=self._tree,
-                        function=self.function,
                         change_tree=self._change_tree,
                         backup_index=self._backup_index)
 
@@ -134,7 +133,7 @@ class DateTree:
         else:
             return self._tree[date]
 
-    def get(self, date, cast=True):
+    def get(self, date):
         if self.empty:
             return self.default
 
@@ -152,15 +151,9 @@ class DateTree:
 
         return result
 
-    def all(self, dates=None):
-        if dates is None:
-            dates, values = zip(*list(self))
-            return EventFrame(DatetimeIndex(dates), **{self.name: np.array(values)})
-
-        if not isinstance(dates, DatetimeIndex):
-            dates = DatetimeIndex(dates)
-
+    def all(self, dates: DatetimeIndex):
         start, end = self.start, self.end
+
         before, during, after = start > dates, (start <= dates) & (end >= dates), end < dates
 
         if self.dtype == "string":
@@ -178,9 +171,7 @@ class DateTree:
             values.flat[np.argwhere(during)] = [self._change_tree[date] for date in dates[during]]
             values[np.argwhere(after)] = self.last
 
-        frame = EventFrame(np.array(dates), **{self.name: values})
-
-        return frame
+        return EventColumn(name=self.name, dates=dates, events=values)
 
     def _safe_add(self, date, value):
         previous_value = self.floor(date)
